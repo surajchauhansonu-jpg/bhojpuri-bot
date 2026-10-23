@@ -1,0 +1,35 @@
+name: bhojpuri-express-bot
+on:
+  schedule:
+    - cron: "0,30 3-14 * * *"
+  workflow_dispatch: {}
+concurrency:
+  group: bhojpuri-bot
+  cancel-in-progress: false
+permissions:
+  contents: write
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: sudo apt-get update && sudo apt-get install -y fonts-noto-core fonts-lohit-deva
+      - run: pip install -r requirements.txt && playwright install --with-deps chromium
+      - name: Run bot
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+          GEMINI_MODEL: gemini-3.5-flash-lite
+          PAGE_NAME: Bhojpuri Express
+          DRY_RUN: "0"
+          MAX_POSTS_PER_RUN: "1"
+        run: python bot.py
+      - name: Save seen.db
+        run: |
+          git config user.name "bot"; git config user.email "bot@users.noreply.github.com"
+          git add -f seen.db && git commit -m "update seen" || echo "no change"
+          git push
