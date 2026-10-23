@@ -1,7 +1,7 @@
 name: bhojpuri-express-bot
 on:
   schedule:
-    - cron: "0,30 3-14 * * *"
+    - cron: "7,37 3-14 * * *"
   workflow_dispatch: {}
 concurrency:
   group: bhojpuri-bot
