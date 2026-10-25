@@ -25,6 +25,7 @@ jobs:
           PAGE_NAME: Bhojpuri Express
           DRY_RUN: "0"
           MAX_POSTS_PER_RUN: "1"
+          MAX_TRIES_PER_RUN: "5"
         run: python bot.py
       - name: Save seen.db
         run: |
