@@ -7,6 +7,7 @@ from urllib.parse import urljoin, urlparse, quote, parse_qs
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 import xml.etree.ElementTree as ET
+import html as htmllib
 
 import requests
 from bs4 import BeautifulSoup
@@ -110,7 +111,10 @@ Neeche ek khabar ke facts hain. Agar ye Bhojpuri cinema/music/celebrity se relat
 Warna sirf JSON do:
 {{"skip": false,
  "headline": "poster ke liye Hindi headline, max 12 shabd, clickbait/jhooth nahi",
- "caption": "Facebook caption Hindi me, 400 se 700 characters, chhoti lines (har line alag, beech me khaali line). Structure: (1) pehli line me hook + ek emoji, (2-5) khabar ke mukhya points - kaun, kya hua, kab/kahan, kyun/background, kisne kya kaha, (6) ek line me aage kya ho sakta hai ya nishkarsh, aakhri line: 'आपकी राय कमेंट में बताएं 👇'. Sirf facts me likhi baatein, koi ateet/andaza nahi.",
+ "highlight": "headline me se wahi 1-3 shabd jo sabse zaroori hain (kisi ka naam ya kendra shabd), headline me jaise likhe hain bilkul waise hi",
+ "subhead": "poster ke liye ek line ka saar, Hindi me, max 14 shabd, headline ko dohraye nahi",
+ "tag": "2-3 shabd ka vishay, jaise: फिल्म अपडेट, नया गाना, विवाद, इंटरव्यू, रिलीज़, अवॉर्ड, शादी",
+ "caption": "Facebook caption Hindi me, 700 se 1100 characters, 8-10 chhoti lines, har line ke beech khaali line. Format: 🔥 pehli line: dhyaan kheenchne wali hook (khabar ka sabse bada point). 📌 agli 3-5 lines: mukhya facts (kaun, kya hua, kab/kahan, kyun, kisne kya kaha) - har line me ek point, apne shabdon me. 🔎 1-2 lines: background ya context (sirf wahi jo text me likha ho). ➡️ 1 line: aage kya ho sakta hai ya is khabar ka matlab. Aakhri line: 'आपकी राय कमेंट में बताएं 👇'. Agar article ka text bahut chhota hai to jitni jaankari hai utna hi likho, jhooth ya andaza mat jodo.",
  "hashtags": ["8 se 10 hashtags, Hindi/English mix, # ke saath. Sirf khabar me aaye naam/film/topic se jude hashtags + #BhojpuriNews #BhojpuriExpress. Jo naam khabar me nahi hai uska hashtag mat banao."]}}
 Sirf facts me jo likha hai wahi use karo, kuch invent mat karo. Original article ke sentences copy mat karo.
 
@@ -125,9 +129,9 @@ Title: {title}
 Description: {desc}
 Text: {body}"""
 
-def make_content(src, facts):
+def _gemini(prompt):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
-    body = {"contents": [{"parts": [{"text": PROMPT.format(page=PAGE_NAME, src=src, recent=recent_text(), today=datetime.now(IST).strftime("%d %b %Y %H:%M IST"), **facts)}]}],
+    body = {"contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"responseMimeType": "application/json", "temperature": 0.7}}
     time.sleep(6)                                 # free tier ke per-minute limit se bachne ke liye
     for attempt in range(3):                      # 429 aaye to wait & retry
@@ -146,31 +150,49 @@ def make_content(src, facts):
         fixed = re.sub(r"\\u(?![0-9a-fA-F]{4})", r"\\\\u", raw)
         return json.loads(fixed, strict=False)
 
+def make_content(src, facts):
+    prompt = PROMPT.format(page=PAGE_NAME, src=src, recent=recent_text(),
+                           today=datetime.now(IST).strftime("%d %b %Y %H:%M IST"), **facts)
+    c = _gemini(prompt)
+    cap = c.get("caption", "")
+    if not c.get("skip") and len(cap) < 550 and len(facts.get("body", "")) > 800:
+        print(f"caption chhota ({len(cap)} chars) - dobara likhwa raha hu")
+        c2 = _gemini(prompt + "\n\nDhyan: pichla caption bahut chhota tha. Ab kam se kam 800 characters aur 8 lines me, text me diye saare mukhya facts ke saath likho.")
+        if not c2.get("skip") and len(c2.get("caption", "")) > len(cap): c = c2
+    return c
+
 # ---------- 3. Poster ----------
 THEMES = [("#b30000", "#ff6a00"), ("#0b3d91", "#00b4d8"), ("#4a148c", "#e91e63")]
-HTML = """<html><body style="margin:0"><div style="width:1080px;height:1350px;position:relative;overflow:hidden;
-background:linear-gradient(135deg,{c1},{c2});font-family:'Noto Sans Devanagari','Hind','Nirmala UI',sans-serif;color:#fff">
-<div style="position:absolute;right:-180px;top:-180px;width:560px;height:560px;border-radius:50%;background:rgba(255,255,255,.08)"></div>
-<div style="position:absolute;left:-220px;bottom:80px;width:520px;height:520px;border-radius:50%;background:rgba(0,0,0,.10)"></div>
-<div style="position:absolute;left:60px;right:60px;top:56px;display:flex;justify-content:space-between;align-items:center">
- {logo_html}<span style="background:#fff;color:{c1};padding:12px 30px;border-radius:34px;font-size:36px;font-weight:700">ताज़ा खबर</span></div>
-<div style="position:absolute;left:60px;right:60px;top:300px;bottom:200px;display:flex;align-items:center">
- <div style="width:14px;align-self:stretch;background:#fff;border-radius:7px;margin-right:36px"></div>
- <div style="font-size:82px;line-height:1.3;font-weight:800;text-shadow:0 4px 14px rgba(0,0,0,.45)">{headline}</div></div>
-<div style="position:absolute;left:0;right:0;bottom:0;height:110px;background:rgba(0,0,0,.45);display:flex;justify-content:space-between;align-items:center;padding:0 60px;font-size:32px">
- <b>{page}</b><span style="opacity:.9">Source: {src}</span></div>
-</div></body></html>"""
+FONT = "'Noto Sans Devanagari','Hind','Nirmala UI',sans-serif"
 
-HTML_PHOTO = """<html><body style="margin:0"><div style="width:1080px;height:1350px;position:relative;overflow:hidden;background:#000;font-family:'Noto Sans Devanagari','Hind','Nirmala UI',sans-serif;color:#fff">
+HTML_PHOTO = """<html><body style="margin:0"><div style="width:1080px;height:1350px;position:relative;overflow:hidden;background:#000;font-family:__FONT__;color:#fff">
 <img src="{img}" style="position:absolute;left:-80px;top:-80px;width:1240px;height:1510px;object-fit:cover;filter:blur(40px) brightness(.5)">
-<img src="{img}" style="position:absolute;left:0;top:190px;width:1080px;height:700px;object-fit:contain">
-<div style="position:absolute;left:60px;right:60px;top:56px;display:flex;justify-content:space-between;align-items:center">
- {logo_html}<span style="background:{c1};color:#fff;padding:12px 30px;border-radius:34px;font-size:36px;font-weight:700">ताज़ा खबर</span></div>
-<div style="position:absolute;left:50px;right:50px;bottom:150px;background:rgba(0,0,0,.72);border-left:16px solid {c2};border-radius:22px;padding:34px 40px;box-shadow:0 10px 40px rgba(0,0,0,.5)">
- <div style="font-size:70px;line-height:1.3;font-weight:800">{headline}</div></div>
-<div style="position:absolute;left:0;right:0;bottom:0;height:110px;background:rgba(0,0,0,.55);display:flex;justify-content:space-between;align-items:center;padding:0 60px;font-size:32px">
- <b>{page}</b><span style="opacity:.9">Source: {src}</span></div>
-</div></body></html>"""
+<img src="{img}" style="position:absolute;left:0;top:170px;width:1080px;height:640px;object-fit:contain">
+<div style="position:absolute;left:60px;right:60px;top:50px;display:flex;justify-content:space-between;align-items:center">
+ {logo_html}<span style="background:{c1};color:#fff;padding:12px 30px;border-radius:34px;font-size:36px;font-weight:700;box-shadow:0 4px 16px rgba(0,0,0,.4)">● ताज़ा खबर</span></div>
+<div style="position:absolute;left:50px;right:50px;bottom:150px;background:rgba(0,0,0,.80);border-left:16px solid {c2};border-radius:22px;padding:58px 40px 32px 40px;box-shadow:0 10px 40px rgba(0,0,0,.55)">
+ <span style="position:absolute;left:30px;top:-26px;background:{c2};color:#fff;padding:8px 26px;border-radius:12px;font-size:32px;font-weight:800">{tag}</span>
+ <div style="font-size:68px;line-height:1.3;font-weight:800">{headline}</div>
+ <div style="height:2px;background:rgba(255,255,255,.25);margin:22px 0 18px 0"></div>
+ <div style="font-size:34px;line-height:1.45;font-weight:500;color:#e9e9e9">{subhead}</div></div>
+<div style="position:absolute;left:0;right:0;bottom:0;height:120px;background:linear-gradient(90deg,{c1},{c2});display:flex;justify-content:space-between;align-items:center;padding:0 50px;font-size:28px">
+ <b style="font-size:38px">{page}</b><span style="max-width:600px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{date} • {src}</span></div>
+</div></body></html>""".replace("__FONT__", FONT)
+
+HTML = """<html><body style="margin:0"><div style="width:1080px;height:1350px;position:relative;overflow:hidden;
+background:linear-gradient(135deg,{c1},{c2});font-family:__FONT__;color:#fff">
+<div style="position:absolute;right:-180px;top:-180px;width:560px;height:560px;border-radius:50%;background:rgba(255,255,255,.08)"></div>
+<div style="position:absolute;left:-220px;bottom:120px;width:560px;height:560px;border-radius:50%;background:rgba(0,0,0,.10)"></div>
+<div style="position:absolute;left:60px;right:60px;top:50px;display:flex;justify-content:space-between;align-items:center">
+ {logo_html}<span style="background:#fff;color:{c1};padding:12px 30px;border-radius:34px;font-size:36px;font-weight:700">● ताज़ा खबर</span></div>
+<div style="position:absolute;left:60px;right:60px;top:300px;bottom:190px;display:flex;flex-direction:column;justify-content:center">
+ <span style="align-self:flex-start;background:#fff;color:{c1};padding:8px 26px;border-radius:12px;font-size:34px;font-weight:800;margin-bottom:28px">{tag}</span>
+ <div style="display:flex"><div style="width:14px;background:#fff;border-radius:7px;margin-right:36px"></div>
+ <div style="font-size:80px;line-height:1.3;font-weight:800;text-shadow:0 4px 14px rgba(0,0,0,.4)">{headline}</div></div>
+ <div style="font-size:38px;line-height:1.45;margin:30px 0 0 50px;opacity:.95">{subhead}</div></div>
+<div style="position:absolute;left:0;right:0;bottom:0;height:120px;background:rgba(0,0,0,.45);display:flex;justify-content:space-between;align-items:center;padding:0 50px;font-size:28px">
+ <b style="font-size:38px">{page}</b><span style="max-width:600px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{date} • {src}</span></div>
+</div></body></html>""".replace("__FONT__", FONT)
 
 def find_logo():
     if LOGO.exists(): return LOGO
@@ -178,7 +200,14 @@ def find_logo():
         if "logo" in f.name.lower(): return f
     return None
 
-def make_poster(headline, src, path, img_uri=None):
+def headline_html(h, hl):
+    h = htmllib.escape(h or "")
+    hl = htmllib.escape((hl or "").strip())
+    if hl and hl in h:
+        h = h.replace(hl, f'<span style="color:#ffd400">{hl}</span>', 1)
+    return h
+
+def make_poster(headline, src, path, img_uri=None, subhead="", highlight="", tag="ताज़ा खबर"):
     c1, c2 = random.choice(THEMES)
     lf = find_logo()
     if lf:
@@ -186,13 +215,14 @@ def make_poster(headline, src, path, img_uri=None):
         logo_html = f'<div style="background:#fff;border-radius:24px;padding:12px 18px;display:flex;align-items:center"><img src="data:image/png;base64,{data}" style="height:110px;max-width:340px;object-fit:contain"></div>'
     else:
         print("WARNING: logo.png nahi mili - logo ke bina poster ban raha hai"); logo_html = "<span></span>"
-    if img_uri:
-        html = HTML_PHOTO.format(c1=c1, c2=c2, img=img_uri, logo_html=logo_html, headline=headline, page=PAGE_NAME, src=src)
-    else:
-        html = HTML.format(c1=c1, c2=c2, logo_html=logo_html, headline=headline, page=PAGE_NAME, src=src)
+    vals = dict(c1=c1, c2=c2, logo_html=logo_html, headline=headline_html(headline, highlight),
+                subhead=htmllib.escape(subhead or ""), tag=htmllib.escape(tag or "ताज़ा खबर"),
+                page=htmllib.escape(PAGE_NAME), src=htmllib.escape(src),
+                date=datetime.now(IST).strftime("%d %b %Y"))
+    page_html = HTML_PHOTO.format(img=img_uri, **vals) if img_uri else HTML.format(**vals)
     with sync_playwright() as p:
         b = p.chromium.launch(); pg = b.new_page(viewport={"width": 1080, "height": 1350})
-        pg.set_content(html); pg.wait_for_timeout(800); pg.screenshot(path=str(path)); b.close()
+        pg.set_content(page_html); pg.wait_for_timeout(800); pg.screenshot(path=str(path)); b.close()
 
 # ---------- 4. Facebook post ----------
 def post_fb(poster, caption):
@@ -279,12 +309,13 @@ def main():
                 print("date pata nahi, skip:", link); mark(c["url"]); mark(link); continue
             facts["published"] = pub.astimezone(IST).strftime("%d %b %Y %H:%M IST") if pub else "pata nahi"
             tried += 1
+            print(f"article text: {len(facts['body'])} chars | {link}")
             src = c["src"]; cont = make_content(src, facts)
             mark(c["url"]); mark(link)
             if cont.get("skip"): print("skip:", link); continue
             caption = cont["caption"] + "\n\n" + " ".join(cont["hashtags"]) + f"\n\nSource: {src}"
             img_uri = fetch_image_uri(facts["image"]) if (USE_IMG and facts.get("image")) else None
-            poster = OUT / f"{int(time.time())}.png"; make_poster(cont["headline"], src, poster, img_uri)
+            poster = OUT / f"{int(time.time())}.png"; make_poster(cont["headline"], src, poster, img_uri, cont.get("subhead", ""), cont.get("highlight", ""), cont.get("tag", "ताज़ा खबर"))
             print("photo:", "haan" if img_uri else "nahi (gradient poster)")
             (poster.with_suffix(".txt")).write_text(caption + "\n\n" + link, encoding="utf-8")
             if DRY_RUN: print("DRY RUN saved:", poster)
