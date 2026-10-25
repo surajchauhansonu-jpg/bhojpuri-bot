@@ -194,17 +194,32 @@ background:linear-gradient(135deg,{c1},{c2});font-family:__FONT__;color:#fff">
  <b style="font-size:38px">{page}</b><span style="max-width:600px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{date} • {src}</span></div>
 </div></body></html>""".replace("__FONT__", FONT)
 
+SERIF = "'Noto Serif Devanagari','Noto Serif','Hind',serif"
+HTML_EDITORIAL = """<html><body style="margin:0"><div style="width:1080px;height:1350px;position:relative;overflow:hidden;background:#1a1210;font-family:__FONT__;color:#fff">
+<img src="{img}" style="position:absolute;left:-80px;top:-80px;width:1240px;height:1510px;object-fit:cover;filter:blur(40px) brightness(.6)">
+<img src="{img}" onload="var r=this.naturalWidth/this.naturalHeight;this.style.objectFit=(r<1.15?'cover':'contain')" style="position:absolute;left:0;top:360px;width:1080px;height:990px;object-fit:cover;object-position:center 30%">
+<div style="position:absolute;left:0;top:0;width:1080px;height:640px;background:linear-gradient(to bottom,#efebe4 0px,#efebe4 470px,rgba(239,235,228,0) 640px)"></div>
+<div style="position:absolute;left:0;top:0;width:1080px;height:470px;background-image:radial-gradient(rgba(0,0,0,.035) 1px,transparent 1px);background-size:6px 6px"></div>
+<div style="position:absolute;left:40px;top:190px;width:130px;height:150px;border-top:3px solid #fff;border-left:3px solid #fff;border-radius:30px 0 0 0;box-shadow:-1px -1px 6px rgba(0,0,0,.12)"></div>
+<div style="position:absolute;left:205px;top:108px;font-family:Georgia,'Noto Serif',serif;font-size:300px;line-height:1;height:150px;overflow:hidden;color:#b0214f;font-weight:700">&ldquo;</div>
+<div style="position:absolute;right:50px;top:58px">{logo_html}</div>
+<div style="position:absolute;left:50px;right:50px;top:285px;text-align:center;font-family:__SERIF__;font-size:58px;line-height:1.4;font-weight:800;color:#161616">{headline}</div>
+<div style="position:absolute;left:0;right:0;bottom:0;height:220px;background:linear-gradient(to top,rgba(0,0,0,.82),rgba(0,0,0,0))"></div>
+<div style="position:absolute;left:50px;right:50px;bottom:36px;display:flex;justify-content:space-between;align-items:center;text-shadow:0 2px 8px rgba(0,0,0,.6)">
+ <b style="font-size:38px">{page}</b><span style="font-size:27px;max-width:600px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{date} • {src}</span></div>
+</div></body></html>""".replace("__FONT__", FONT).replace("__SERIF__", SERIF)
+
 def find_logo():
     if LOGO.exists(): return LOGO
     for f in HERE.glob("*.png"):
         if "logo" in f.name.lower(): return f
     return None
 
-def headline_html(h, hl):
+def headline_html(h, hl, color="#ffd400"):
     h = htmllib.escape(h or "")
     hl = htmllib.escape((hl or "").strip())
     if hl and hl in h:
-        h = h.replace(hl, f'<span style="color:#ffd400">{hl}</span>', 1)
+        h = h.replace(hl, f'<span style="color:{color}">{hl}</span>', 1)
     return h
 
 def make_poster(headline, src, path, img_uri=None, subhead="", highlight="", tag="ताज़ा खबर"):
@@ -219,7 +234,15 @@ def make_poster(headline, src, path, img_uri=None, subhead="", highlight="", tag
                 subhead=htmllib.escape(subhead or ""), tag=htmllib.escape(tag or "ताज़ा खबर"),
                 page=htmllib.escape(PAGE_NAME), src=htmllib.escape(src),
                 date=datetime.now(IST).strftime("%d %b %Y"))
-    page_html = HTML_PHOTO.format(img=img_uri, **vals) if img_uri else HTML.format(**vals)
+    style = os.getenv("POSTER_STYLE", "news")          # news | editorial | mix
+    if style == "mix": style = random.choice(["news", "editorial"])
+    if img_uri and style == "editorial":
+        vals["headline"] = headline_html(headline, highlight, "#b0214f")
+        page_html = HTML_EDITORIAL.format(img=img_uri, **vals)
+    elif img_uri:
+        page_html = HTML_PHOTO.format(img=img_uri, **vals)
+    else:
+        page_html = HTML.format(**vals)
     with sync_playwright() as p:
         b = p.chromium.launch(); pg = b.new_page(viewport={"width": 1080, "height": 1350})
         pg.set_content(page_html); pg.wait_for_timeout(800); pg.screenshot(path=str(path)); b.close()
