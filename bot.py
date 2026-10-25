@@ -3,7 +3,10 @@ Run:  python bot.py          (DRY_RUN=1 in .env => sirf out/ folder me save, pos
 """
 import os, re, json, base64, random, sqlite3, time
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, quote, parse_qs
+from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
+import xml.etree.ElementTree as ET
 
 import requests
 from bs4 import BeautifulSoup
@@ -30,10 +33,24 @@ GEMINI_KEY  = os.getenv("GEMINI_API_KEY")
 FB_PAGE_ID  = os.getenv("FB_PAGE_ID")
 FB_TOKEN    = os.getenv("FB_PAGE_TOKEN")
 LOGO        = HERE / "logo.png"
+MAX_AGE_H   = int(os.getenv("MAX_AGE_HOURS", "24"))        # isse purani khabar nahi lenge
+MAX_TRIES   = int(os.getenv("MAX_TRIES_PER_RUN", "8"))     # ek run me max itne articles Gemini ko dikhayenge
+STRICT_DATE = os.getenv("STRICT_DATE", "1") == "1"          # date pata na ho to khabar skip
+QUERIES     = os.getenv("NEWS_QUERIES", "भोजपुरी सिनेमा|भोजपुरी फिल्म|भोजपुरी गाना|भोजपुरी अभिनेत्री|भोजपुरी इंडस्ट्री|पवन सिंह|खेसारी लाल यादव|निरहुआ|Bhojpuri cinema").split("|")
+IST = timezone(timedelta(hours=5, minutes=30))
 UA = {"User-Agent": "Mozilla/5.0 (compatible; BhojpuriExpressBot/1.0)"}
 
 db = sqlite3.connect(HERE / "seen.db")
 db.execute("CREATE TABLE IF NOT EXISTS seen (url TEXT PRIMARY KEY, ts REAL)")
+
+db.execute("CREATE TABLE IF NOT EXISTS posted (headline TEXT, ts REAL)")
+
+def save_headline(h): db.execute("INSERT INTO posted VALUES (?,?)", (h, time.time())); db.commit()
+
+def recent_text(hours=48, n=25):
+    rows = db.execute("SELECT headline FROM posted WHERE ts>? ORDER BY ts DESC LIMIT ?",
+                      (time.time() - hours * 3600, n)).fetchall()
+    return "\n".join("- " + r[0] for r in rows) or "(abhi koi nahi)"
 
 def seen(url): return db.execute("SELECT 1 FROM seen WHERE url=?", (url,)).fetchone() is not None
 def mark(url): db.execute("INSERT OR IGNORE INTO seen VALUES (?,?)", (url, time.time())); db.commit()
@@ -52,16 +69,28 @@ def listing_links(url, limit=8):
         if len(out) >= limit: break
     return out
 
+def parse_dt(v):
+    if not v: return None
+    v = v.strip()
+    try: d = datetime.fromisoformat(v.replace("Z", "+00:00"))
+    except Exception:
+        try: d = parsedate_to_datetime(v)
+        except Exception: return None
+    return d if d.tzinfo else d.replace(tzinfo=IST)
+
 def article_facts(url):
-    soup = BeautifulSoup(requests.get(url, headers=UA, timeout=20).text, "html.parser")
+    html = requests.get(url, headers=UA, timeout=20).text
+    soup = BeautifulSoup(html, "html.parser")
     meta = lambda p: (soup.find("meta", property=p) or soup.find("meta", attrs={"name": p}) or {}).get("content", "")
     root = soup.find("article") or soup
     plist = [p.get_text(" ", strip=True) for p in root.find_all("p")]
-    plist = [t for t in plist if len(t) > 40]
-    paras = " ".join(plist)
+    paras = " ".join(t for t in plist if len(t) > 40)
     img = meta("og:image") or meta("twitter:image")
+    pub = meta("article:published_time") or meta("og:article:published_time") or meta("datePublished")
+    if not pub:
+        m = re.search(r'"datePublished"\s*:\s*"([^"]+)"', html); pub = m.group(1) if m else ""
     return {"title": meta("og:title"), "desc": meta("og:description"), "body": paras[:5000],
-            "image": urljoin(url, img) if img else ""}
+            "image": urljoin(url, img) if img else "", "published": pub}
 
 def fetch_image_uri(img_url):
     try:
@@ -77,13 +106,19 @@ class RateLimited(Exception): pass
 
 # ---------- 2. Gemini (free tier): headline + caption + hashtags ----------
 PROMPT = """Tum "{page}" Facebook page ke editor ho (Bhojpuri cinema/entertainment news).
-Neeche ek khabar ke facts hain. Agar ye Bhojpuri cinema/music/celebrity se related nahi hai, ya facts kamzor hain, to {{"skip": true}} do.
+Neeche ek khabar ke facts hain. Agar ye Bhojpuri cinema/music/celebrity se related nahi hai, ya facts kamzor hain, to {{"skip": true}} do. Agar ye khabar neeche wali "pehle post ho chuki khabrein" me se kisi ek ki hi same story hai (chaahe site alag ho), to bhi {{"skip": true}} do. Agar khabar 1 din se zyada purani hai, ya kisi purani ghatna ko dobara bata rahi hai, to bhi {{"skip": true}} do.
 Warna sirf JSON do:
 {{"skip": false,
  "headline": "poster ke liye Hindi headline, max 12 shabd, clickbait/jhooth nahi",
  "caption": "Facebook caption Hindi me, 400 se 700 characters, chhoti lines (har line alag, beech me khaali line). Structure: (1) pehli line me hook + ek emoji, (2-5) khabar ke mukhya points - kaun, kya hua, kab/kahan, kyun/background, kisne kya kaha, (6) ek line me aage kya ho sakta hai ya nishkarsh, aakhri line: 'आपकी राय कमेंट में बताएं 👇'. Sirf facts me likhi baatein, koi ateet/andaza nahi.",
  "hashtags": ["8 se 10 hashtags, Hindi/English mix, # ke saath. Sirf khabar me aaye naam/film/topic se jude hashtags + #BhojpuriNews #BhojpuriExpress. Jo naam khabar me nahi hai uska hashtag mat banao."]}}
 Sirf facts me jo likha hai wahi use karo, kuch invent mat karo. Original article ke sentences copy mat karo.
+
+Pehle post ho chuki khabrein (last 48 ghante):
+{recent}
+
+Aaj ki tareekh: {today}
+Khabar ki publish date: {published}
 
 Source: {src}
 Title: {title}
@@ -92,7 +127,7 @@ Text: {body}"""
 
 def make_content(src, facts):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
-    body = {"contents": [{"parts": [{"text": PROMPT.format(page=PAGE_NAME, src=src, **facts)}]}],
+    body = {"contents": [{"parts": [{"text": PROMPT.format(page=PAGE_NAME, src=src, recent=recent_text(), today=datetime.now(IST).strftime("%d %b %Y %H:%M IST"), **facts)}]}],
             "generationConfig": {"responseMimeType": "application/json", "temperature": 0.7}}
     time.sleep(6)                                 # free tier ke per-minute limit se bachne ke liye
     for attempt in range(3):                      # 429 aaye to wait & retry
@@ -166,31 +201,102 @@ def post_fb(poster, caption):
     r.raise_for_status(); return r.json()
 
 # ---------- main ----------
+# ---------- 1b. Poore internet se khabrein dhundho ----------
+def rss_items(url):
+    r = requests.get(url, headers=UA, timeout=20); r.raise_for_status()
+    return ET.fromstring(r.content).findall(".//item")
+
+def google_news(q):
+    url = "https://news.google.com/rss/search?q=" + quote(q + " when:1d") + "&hl=hi&gl=IN&ceid=IN:hi"
+    out = []
+    for it in rss_items(url):
+        src = it.find("source")
+        out.append({"url": (it.findtext("link") or "").strip(), "src": (src.text if src is not None and src.text else "News"),
+                    "published": parse_dt(it.findtext("pubDate"))})
+    return out
+
+def bing_news(q):
+    url = "https://www.bing.com/news/search?q=" + quote(q) + "&format=rss&setlang=hi-IN&cc=IN"
+    out = []
+    for it in rss_items(url):
+        link = (it.findtext("link") or "").strip()
+        real = parse_qs(urlparse(link).query).get("url", [link])[0]
+        out.append({"url": real, "src": urlparse(real).netloc.replace("www.", "") or "News",
+                    "published": parse_dt(it.findtext("pubDate"))})
+    return out
+
+def site_links():
+    out = []
+    for name, url in SOURCES.items():
+        try: out += [{"url": l, "src": name, "published": None} for l in listing_links(url)]
+        except Exception as e: print(f"[{name}] listing fail: {e}")
+    return out
+
+def collect_candidates():
+    raw = site_links()
+    for q in QUERIES:
+        for fn in (google_news, bing_news):
+            try: raw += fn(q)
+            except Exception as e: print(f"{fn.__name__}({q}) fail: {e}")
+    now, seen_urls, out = datetime.now(IST), set(), []
+    for c in raw:
+        u = c["url"]
+        if not u or u in seen_urls or seen(u): continue
+        seen_urls.add(u)
+        p = c["published"]
+        if p and (now - p).total_seconds() > MAX_AGE_H * 3600:      # purani khabar
+            mark(u); continue
+        out.append(c)
+    dated = sorted([c for c in out if c["published"]], key=lambda c: c["published"], reverse=True)   # sabse nayi pehle
+    undated = [c for c in out if not c["published"]]; random.shuffle(undated)
+    return dated + undated
+
+def resolve(c):
+    u = c["url"]
+    if "news.google.com" not in u: return u
+    try:
+        from googlenewsdecoder import gnewsdecoder
+        r = gnewsdecoder(u, interval=1)
+        if r.get("status"): return r["decoded_url"]
+    except Exception as e:
+        print("google link decode fail:", e)
+    return None
+
 def main():
-    posted, items = 0, list(SOURCES.items()); random.shuffle(items)
-    for src, url in items:
-        if posted >= MAX_POSTS: break
-        try: links = listing_links(url)
-        except Exception as e: print(f"[{src}] listing fail: {e}"); continue
-        for link in links:
-            if posted >= MAX_POSTS: break
-            if seen(link): continue
-            try:
-                facts = article_facts(link); c = make_content(src, facts); mark(link)
-                if c.get("skip"): print("skip:", link); continue
-                caption = c["caption"] + "\n\n" + " ".join(c["hashtags"]) + f"\n\nSource: {src}"
-                img_uri = fetch_image_uri(facts["image"]) if (USE_IMG and facts.get("image")) else None
-                poster = OUT / f"{int(time.time())}.png"; make_poster(c["headline"], src, poster, img_uri)
-                print("photo:", "haan" if img_uri else "nahi (gradient poster)")
-                (poster.with_suffix(".txt")).write_text(caption + "\n\n" + link, encoding="utf-8")
-                if DRY_RUN: print("DRY RUN saved:", poster)
-                else: print("posted:", post_fb(poster, caption))
-                posted += 1; time.sleep(random.randint(5, 20))
-            except RateLimited:
-                print("Gemini limit lag gayi. Run band kar raha hu - 1-2 minute (ya kal) baad dobara chalao, ya GEMINI_MODEL flash-lite wala rakho.")
-                return
-            except Exception as e:
-                print(f"error {link}: {e}")
+    cands = collect_candidates()
+    print(f"{len(cands)} nayi candidate khabrein mili")
+    posted = tried = 0
+    for c in cands:
+        if posted >= MAX_POSTS or tried >= MAX_TRIES: break
+        try:
+            link = resolve(c)
+            if not link or seen(link): mark(c["url"]); continue
+            facts = article_facts(link)
+            pub = c["published"] or parse_dt(facts["published"])
+            if pub and (datetime.now(IST) - pub).total_seconds() > MAX_AGE_H * 3600:
+                print("purani khabar skip:", link); mark(c["url"]); mark(link); continue
+            if not pub and STRICT_DATE:
+                print("date pata nahi, skip:", link); mark(c["url"]); mark(link); continue
+            facts["published"] = pub.astimezone(IST).strftime("%d %b %Y %H:%M IST") if pub else "pata nahi"
+            tried += 1
+            src = c["src"]; cont = make_content(src, facts)
+            mark(c["url"]); mark(link)
+            if cont.get("skip"): print("skip:", link); continue
+            caption = cont["caption"] + "\n\n" + " ".join(cont["hashtags"]) + f"\n\nSource: {src}"
+            img_uri = fetch_image_uri(facts["image"]) if (USE_IMG and facts.get("image")) else None
+            poster = OUT / f"{int(time.time())}.png"; make_poster(cont["headline"], src, poster, img_uri)
+            print("photo:", "haan" if img_uri else "nahi (gradient poster)")
+            (poster.with_suffix(".txt")).write_text(caption + "\n\n" + link, encoding="utf-8")
+            if DRY_RUN: print("DRY RUN saved:", poster)
+            else: print("posted:", post_fb(poster, caption))
+            save_headline(cont["headline"])
+            posted += 1; time.sleep(random.randint(5, 20))
+        except RateLimited:
+            print("Gemini limit lag gayi. Run band kar raha hu - agle run me dobara try hoga.")
+            return
+        except Exception as e:
+            print(f"error {c['url']}: {e}"); mark(c["url"])
+    print(f"khatam: {posted} post, {tried} articles Gemini ko dikhaye")
 
 if __name__ == "__main__":
     main()
